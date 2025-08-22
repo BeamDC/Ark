@@ -31,7 +31,7 @@ impl Mode {
 }
 
 // todo : better name this one sucks :(
-pub struct InputReader {
+pub struct Command {
     // whether to add the input path to an output archive,
     // or to extract the input archive into the output path
     pub mode: Option<Mode>,
@@ -41,7 +41,7 @@ pub struct InputReader {
     // todo : more options when the archiver become more advanced
 }
 
-impl InputReader {
+impl Command {
     /// consume `chars` until a whitespace or end of iterator,
     /// returning the consumed characters as a `String`
     fn consume_until_whitespace(chars: &mut Chars) -> String {
@@ -128,7 +128,7 @@ impl InputReader {
     /// parse an input string into usable information for the archiver
     /// source string should be of the following format:
     /// `Ark (add/a | extract/x) "input/file/path" "output/file/path" -options...`
-    pub fn new(src: String) -> InputReader {
+    pub fn new(src: String) -> Command {
         let mut toks = Self::tokenize(src)
             .into_iter()
             .rev()
@@ -158,7 +158,7 @@ impl InputReader {
             _ => None
         };
 
-        let mut reader = InputReader {
+        let mut reader = Command {
             mode,
             input,
             output,
@@ -184,7 +184,7 @@ impl InputReader {
     }
 }
 
-impl fmt::Display for InputReader {
+impl fmt::Display for Command {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         let mode = match &self.mode {
             Some(Mode::Add) => "add",

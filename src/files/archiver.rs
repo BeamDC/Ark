@@ -71,7 +71,7 @@ impl Archiver {
     /// otherwise it will simply be created from
     /// all files contained in the input path
     pub fn add(&mut self) {
-        let buffer_size = 1024 * 1024 * 32;
+        let buffer_size = 1024 * 1024 * 8;
         let output_file = OpenOptions::new()
             .create(true)
             .append(true)
@@ -99,12 +99,13 @@ impl Archiver {
             self.files_processed += 1;
             self.bytes_processed += bytes_copied as usize;
 
-            // self.format_progress(format!("{}", file.display()));
+            self.format_progress(format!("{}", file.display()));
             // stdout().flush().unwrap();
+
+            self.speed = (self.bytes_processed as f64 /
+                self.start_time.unwrap().elapsed().as_secs_f64()
+            ) as usize;
         }
-        self.speed = (self.total_bytes as f64 /
-            self.start_time.unwrap().elapsed().as_secs_f64()
-        ) as usize;
 
         // not hacky in the slightest
         let speed = match self.speed  {
@@ -143,6 +144,9 @@ impl FmtProgress for Archiver {
 
     fn get_estimated_time_remaining(&self) -> Option<f64> {
         let remaining_bytes = self.total_bytes.saturating_sub(self.bytes_processed) as f64;
+        if self.speed == 0 {
+            return None
+        }
         Some(remaining_bytes / self.speed as f64)
     }
 }

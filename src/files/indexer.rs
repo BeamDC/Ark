@@ -1,3 +1,4 @@
+use std::io::{stdout, Write};
 use std::path::PathBuf;
 use std::time::Instant;
 use walkdir::WalkDir;
@@ -52,6 +53,7 @@ impl ArchiveIndexer {
 
         for entry in self.contents.clone() {
             println!("indexed :: {}", entry.to_str().unwrap());
+            // stdout().flush().unwrap();
         }
 
         println!(

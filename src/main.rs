@@ -18,7 +18,8 @@ fn main() {
         println!("{}", &command);
 
         // perform specified actions
-        let archiver = Archiver::new(command);
+        let mut archiver = Archiver::new(command);
+        archiver.operate()
 
         // output desired item(s)
     }

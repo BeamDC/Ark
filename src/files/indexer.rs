@@ -8,6 +8,7 @@ pub struct ArchiveIndexer {
     pub contents: Vec<PathBuf>,
     pub read_start_time: Option<Instant>,
     pub file_count: usize,
+    pub bytes_count: usize,
 }
 
 impl ArchiveIndexer {
@@ -17,6 +18,7 @@ impl ArchiveIndexer {
             contents: vec![],
             read_start_time: None,
             file_count: 0,
+            bytes_count: 0,
         }
     }
 
@@ -26,12 +28,24 @@ impl ArchiveIndexer {
     pub fn index_files(&mut self) {
         self.read_start_time = Some(Instant::now());
 
-        let contents = WalkDir::new(&self.root)
+        let mut contents = WalkDir::new(&self.root)
             .into_iter()
             .filter_map(|entry| entry.ok())
             .filter(|entry| entry.file_type().is_file())
             .map(|entry| entry.path().to_path_buf())
             .collect::<Vec<PathBuf>>();
+
+        // Sort by file size, smallest first
+        contents.sort_by_key(|path| {
+            std::fs::metadata(path)
+                .map(|m| m.len())
+                .unwrap_or(u64::MAX) // Put files we can't read at the end
+        });
+
+        self.bytes_count = WalkDir::new(&self.root)
+            .into_iter()
+            .map(|item| item.unwrap().metadata().unwrap().len() as usize)
+            .sum();
 
         self.file_count = contents.len();
         self.contents = contents;

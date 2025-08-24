@@ -1,11 +1,11 @@
-use std::fs;
+use std::{cmp, fs};
 use std::fs::{File, OpenOptions};
 use std::io::{copy, stdout, BufReader, BufWriter, Write};
 use std::path::PathBuf;
 use std::time::Instant;
 use crate::cli::input::{Command, Mode};
 use crate::cli::output::FmtProgress;
-use crate::files::indexer::ArchiveIndexer;
+use crate::files::indexer::{ArchiveIndexer, FileRange};
 
 pub struct Archiver {
     pub mode: Mode,
@@ -20,6 +20,9 @@ pub struct Archiver {
     pub bytes_processed: usize,
     pub files_processed: usize,
     pub speed: usize,
+
+    pub ranges: Vec<FileRange>,
+    pub buffer_size: usize,
 }
 
 impl Archiver {
@@ -46,6 +49,7 @@ impl Archiver {
         let files = index.contents;
         let file_count = index.file_count;
         let total_bytes = index.bytes_count;
+        let ranges = index.ranges;
 
         Archiver {
             mode,
@@ -58,6 +62,8 @@ impl Archiver {
             bytes_processed: 0,
             files_processed: 0,
             speed: 0,
+            ranges,
+            buffer_size: 0,
         }
     }
 
@@ -71,7 +77,6 @@ impl Archiver {
     /// otherwise it will simply be created from
     /// all files contained in the input path
     pub fn add(&mut self) {
-        let buffer_size = 1024 * 1024 * 8;
         let output_file = OpenOptions::new()
             .create(true)
             .append(true)
@@ -80,27 +85,56 @@ impl Archiver {
                 todo!("return error when file cannot be opened")
             });
 
-        let mut buffer = BufWriter::with_capacity(buffer_size, output_file);
+        let mut buffer = BufWriter::with_capacity(self.buffer_size, output_file);
 
         // todo : write header
 
         // write data from all files into one
-        for file in &self.files {
+        for (i, file) in self.files.iter().enumerate() {
+            let current_range = self.ranges.get(
+                self.ranges.iter().position(|fr| {
+                    i >= fr.range.0 && i < fr.range.1
+                }).unwrap()
+            ).unwrap_or_else(|| {
+                todo!("return error that current file is not in indexed range")
+            });
+
+            if current_range.buffer_size > self.buffer_size {
+                self.buffer_size = current_range.buffer_size;
+
+                buffer.flush().unwrap_or_else(|_| {
+                   todo!("return error that flush failed")
+                });
+                let writer = buffer.into_inner().unwrap_or_else(|_| {
+                    todo!("return error that getting the writer failed")
+                });
+
+                buffer = BufWriter::with_capacity(self.buffer_size, writer);
+            }
+
             let input_file = File::open(file).unwrap_or_else(|_| {
                 todo!("return error that file open failed")
             });
-            let mut reader = BufReader::with_capacity(buffer_size, input_file);
+
+            let reader_size = cmp::min(
+                self.buffer_size,
+                input_file.metadata().unwrap().len() as usize
+            );
+            let mut reader = BufReader::with_capacity(
+                reader_size,
+                input_file
+            );
 
             // Stream copy instead of loading everything into memory
             let bytes_copied = copy(&mut reader, &mut buffer).unwrap_or_else(|_| {
                 todo!("return error that copy failed")
             });
 
+            // logging
             self.files_processed += 1;
             self.bytes_processed += bytes_copied as usize;
 
             self.format_progress(format!("{}", file.display()));
-            // stdout().flush().unwrap();
 
             self.speed = (self.bytes_processed as f64 /
                 self.start_time.unwrap().elapsed().as_secs_f64()
@@ -116,9 +150,10 @@ impl Archiver {
             _ => format!("{:.1} TB", self.speed as f64 / (1024.0 * 1024.0 * 1024.0 * 1024.0)),
         };
 
-        println!("Archival Completed in {:.2}s with a speed of {} per second",
-                 self.start_time.unwrap().elapsed().as_secs_f64(),
-                 speed,
+        println!(
+            "Archival Completed in {:.2}s with a speed of {} per second",
+            self.start_time.unwrap().elapsed().as_secs_f64(),
+            speed,
         );
     }
 
@@ -148,6 +183,10 @@ impl FmtProgress for Archiver {
             return None
         }
         Some(remaining_bytes / self.speed as f64)
+    }
+
+    fn get_current_speed(&self) -> Option<usize> {
+        Some(self.speed)
     }
 }
 

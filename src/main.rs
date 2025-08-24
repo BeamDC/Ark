@@ -2,7 +2,6 @@ use std::io;
 use std::io::BufRead;
 use crate::cli::input::Command;
 use crate::files::archiver::Archiver;
-use crate::files::indexer::ArchiveIndexer;
 
 mod cli;
 mod files;

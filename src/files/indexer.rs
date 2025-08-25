@@ -1,4 +1,3 @@
-use std::io::{stdout, Write};
 use std::path::PathBuf;
 use std::time::Instant;
 use walkdir::WalkDir;

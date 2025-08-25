@@ -18,7 +18,10 @@ fn main() {
 
         // perform specified actions
         let mut archiver = Archiver::new(command);
-        archiver.operate()
+        let archival_result = archiver.operate();
+        if archival_result.is_err() {
+            panic!("archiver encountered an error")
+        }
 
         // output desired item(s)
     }

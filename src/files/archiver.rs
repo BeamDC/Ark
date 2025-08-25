@@ -1,11 +1,11 @@
-use std::{cmp, fs};
-use std::fs::{File, OpenOptions};
-use std::io::{copy, stdout, BufReader, BufWriter, Write};
-use std::path::PathBuf;
-use std::time::Instant;
 use crate::cli::input::{Command, Mode};
 use crate::cli::output::FmtProgress;
 use crate::files::indexer::{ArchiveIndexer, FileRange};
+use std::fs::{File, OpenOptions};
+use std::io::{copy, BufReader, BufWriter, Write};
+use std::path::PathBuf;
+use std::time::Instant;
+use std::cmp;
 
 pub struct Archiver {
     pub mode: Mode,
@@ -19,11 +19,14 @@ pub struct Archiver {
     pub start_time: Option<Instant>,
     pub bytes_processed: usize,
     pub files_processed: usize,
+    pub archive_size: usize,
     pub speed: usize,
 
     pub ranges: Vec<FileRange>,
     pub buffer_size: usize,
 }
+
+pub struct ArchivalError(String);
 
 impl Archiver {
     /// construct a new `Archiver` from a `Command`
@@ -61,61 +64,79 @@ impl Archiver {
             start_time: None,
             bytes_processed: 0,
             files_processed: 0,
+            archive_size: 0,
             speed: 0,
             ranges,
             buffer_size: 0,
         }
     }
 
-    /// Extract the contents of an archive into the output path
-    pub fn extract(&mut self) {
-        todo!()
-    }
-
     /// Compile the files from the input path into the output archive.
     /// if the archive does exist it will be updated with the given files,
     /// otherwise it will simply be created from
     /// all files contained in the input path
-    pub fn add(&mut self) {
+    pub fn add(&mut self) -> Result<usize, ArchivalError>{
         let output_file = OpenOptions::new()
             .create(true)
             .append(true)
-            .open(&self.output)
-            .unwrap_or_else(|_| {
-                todo!("return error when file cannot be opened")
-            });
+            .open(&self.output);
+        if output_file.is_err() {
+            return Err(
+                ArchivalError(String::from("Could not open output file"))
+            )
+        }
+        let output_file = output_file.unwrap();
 
         let mut buffer = BufWriter::with_capacity(self.buffer_size, output_file);
 
-        // todo : write header
+        // todo : write archive header
 
         // write data from all files into one
         for (i, file) in self.files.iter().enumerate() {
+            // todo : file header
+
+            // get current file range
             let current_range = self.ranges.get(
                 self.ranges.iter().position(|fr| {
                     i >= fr.range.0 && i < fr.range.1
                 }).unwrap()
-            ).unwrap_or_else(|| {
-                todo!("return error that current file is not in indexed range")
-            });
+            );
+            if current_range.is_none() {
+                return Err(ArchivalError(
+                    format!("Could not find range for file indexed at {}", i)
+                ))
+            }
+            let current_range = current_range.unwrap();
 
+            // resize buffer
             if current_range.buffer_size > self.buffer_size {
                 self.buffer_size = current_range.buffer_size;
 
-                buffer.flush().unwrap_or_else(|_| {
-                   todo!("return error that flush failed")
-                });
-                let writer = buffer.into_inner().unwrap_or_else(|_| {
-                    todo!("return error that getting the writer failed")
-                });
+                let flush = buffer.flush();
+                if flush.is_err() {
+                    return Err(ArchivalError(
+                        String::from("failed to flush buffer during resize")
+                    ))
+                }
+                let writer = buffer.into_inner();
+                if writer.is_err() {
+                    return Err(ArchivalError(
+                        String::from("failed to get inner writer from buffer")
+                    ))
+                }
+                let writer = writer.unwrap();
 
                 buffer = BufWriter::with_capacity(self.buffer_size, writer);
             }
 
-            let input_file = File::open(file).unwrap_or_else(|_| {
-                todo!("return error that file open failed")
-            });
-
+            // read file
+            let input_file = File::open(file);
+            if input_file.is_err() {
+                return Err(ArchivalError(
+                    String::from("Could not open input file")
+                ))
+            }
+            let input_file = input_file.unwrap();
             let reader_size = cmp::min(
                 self.buffer_size,
                 input_file.metadata().unwrap().len() as usize
@@ -125,10 +146,14 @@ impl Archiver {
                 input_file
             );
 
-            // Stream copy instead of loading everything into memory
-            let bytes_copied = copy(&mut reader, &mut buffer).unwrap_or_else(|_| {
-                todo!("return error that copy failed")
-            });
+            // stream copy instead of loading everything into memory
+            let bytes_copied = copy(&mut reader, &mut buffer);
+            if bytes_copied.is_err() {
+                return Err(ArchivalError(
+                    String::from("failed to copy to buffer")
+                ))
+            }
+            let bytes_copied = bytes_copied.unwrap();
 
             // logging
             self.files_processed += 1;
@@ -155,11 +180,18 @@ impl Archiver {
             self.start_time.unwrap().elapsed().as_secs_f64(),
             speed,
         );
+
+        Ok(self.archive_size)
+    }
+
+    /// Extract the contents of an archive into the output path
+    pub fn extract(&mut self) {
+        todo!()
     }
 
     /// general function to run all operations specified by the command
     // todo : maybe a better name ig
-    pub fn operate(&mut self) {
+    pub fn operate(&mut self) -> Result<usize, ArchivalError> {
         self.start_time = Some(Instant::now());
         match self.mode {
             Mode::Add => {

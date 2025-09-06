@@ -17,6 +17,10 @@ pub mod organization {
     pub mod log;
 }
 
+mod tests {
+    mod organizer_tests;
+}
+
 pub fn run() {
     use std::io;
     use std::io::BufRead;

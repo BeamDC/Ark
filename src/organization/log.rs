@@ -42,6 +42,7 @@ impl LogData {
         if !data_path.exists() {
             File::create(&data_path).unwrap();
         }
+        todo!("gather all important data and write it to the file")
     }
 
     /// write all file data to `ark.data`
@@ -56,8 +57,37 @@ impl LogData {
     }
 
     /// read and parse `ark.data` into `LogData`
-    pub fn read_log(&self) -> LogData {
-        let data_path = self.root.join("ark.data");
+    ///
+    /// # Example
+    /// ```ignore
+    ///     /// the following are the file contents being parsed
+    ///     // path/to/root/dir/
+    ///     // 2
+    ///     // a,b,c,d
+    ///     // file1.mov;a,b
+    ///     // file2.mp4;c,d
+    ///
+    ///
+    ///    let data = LogData::read_log(PathBuf::from("src/tests"));
+    ///
+    ///    assert_eq!(data.root, PathBuf::from("path/to/root/dir/"));
+    ///    assert_eq!(data.file_count, 2);
+    ///    assert_eq!(data.tags, vec![
+    ///        Tag::new("a".to_owned()),
+    ///        Tag::new("b".to_owned()),
+    ///        Tag::new("c".to_owned()),
+    ///        Tag::new("d".to_owned()),
+    ///    ]);
+    ///    assert_eq!(data.items[0], VidItem {
+    ///        path: PathBuf::from("file1.mov"),
+    ///        name: "file1".to_string(),
+    ///        extension: "mov".to_string(),
+    ///        tags: vec![Tag::new("a".to_owned()), Tag::new("b".to_owned())],
+    ///        selected: false,
+    ///    });
+    /// ```
+    pub fn read_log(path: PathBuf) -> LogData {
+        let data_path = path.join("ark.data");
         if !data_path.exists() {
             return LogData::default();
         }
@@ -136,7 +166,7 @@ impl LogData {
             root,
             file_count,
             tags: all_tags,
-            items,
+            items
         }
     }
 }

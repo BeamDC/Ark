@@ -1,11 +1,12 @@
-use crate::cli::input::{Command, Mode};
-use crate::cli::output::FmtProgress;
-use crate::files::indexer::{ArchiveIndexer, FileRange};
 use std::fs::{File, OpenOptions};
 use std::io::{copy, BufReader, BufWriter, Write};
 use std::path::PathBuf;
 use std::time::Instant;
 use std::cmp;
+use crate::archival::cli::input::{Command, Mode};
+use crate::archival::cli::output::FmtProgress;
+use crate::archival::files::header::{ArchiveHeader, FileHeader, Header};
+use crate::archival::files::indexer::{ArchiveIndexer, FileRange};
 
 pub struct Archiver {
     pub mode: Mode,
@@ -19,14 +20,14 @@ pub struct Archiver {
     pub start_time: Option<Instant>,
     pub bytes_processed: usize,
     pub files_processed: usize,
-    pub archive_size: usize,
+    pub archive_size: u64,
     pub speed: usize,
 
     pub ranges: Vec<FileRange>,
     pub buffer_size: usize,
 }
 
-pub struct ArchivalError(String);
+pub struct ArchivalError(pub String);
 
 impl Archiver {
     /// construct a new `Archiver` from a `Command`
@@ -54,6 +55,14 @@ impl Archiver {
         let total_bytes = index.bytes_count;
         let ranges = index.ranges;
 
+        // if archive is being extracted, get the total archive size
+        let archive_size = match mode {
+            Mode::Extract => {
+                input.metadata().unwrap().len()
+            }
+            _ => 0
+        };
+
         Archiver {
             mode,
             input,
@@ -64,7 +73,7 @@ impl Archiver {
             start_time: None,
             bytes_processed: 0,
             files_processed: 0,
-            archive_size: 0,
+            archive_size,
             speed: 0,
             ranges,
             buffer_size: 0,
@@ -75,7 +84,7 @@ impl Archiver {
     /// if the archive does exist it will be updated with the given files,
     /// otherwise it will simply be created from
     /// all files contained in the input path
-    pub fn add(&mut self) -> Result<usize, ArchivalError>{
+    pub fn add(&mut self) -> Result<u64, ArchivalError>{
         let output_file = OpenOptions::new()
             .create(true)
             .append(true)
@@ -93,7 +102,29 @@ impl Archiver {
 
         // write data from all files into one
         for (i, file) in self.files.iter().enumerate() {
-            // todo : file header
+            let input_file = File::open(file);
+            if input_file.is_err() {
+                return Err(ArchivalError(
+                    format!(
+                        "Could not open input file: \"{}\"\nreason: {}",
+                        file.display(),
+                        input_file.err().unwrap())
+                ))
+            }
+            let input_file = input_file.unwrap();
+            let metadata = input_file.metadata().unwrap();
+
+            //todo : compress the file
+
+            let header = Header::File {
+                name: file.file_name().unwrap().to_str().unwrap().to_string(),
+                method: 0,
+                compressed_size: metadata.len(),
+                decompressed_size: metadata.len(),
+            };
+
+            buffer.write(header.to_bytes().as_slice())
+                .expect("Failed to write file header");
 
             // get current file range
             let current_range = self.ranges.get(
@@ -130,16 +161,9 @@ impl Archiver {
             }
 
             // read file
-            let input_file = File::open(file);
-            if input_file.is_err() {
-                return Err(ArchivalError(
-                    String::from("Could not open input file")
-                ))
-            }
-            let input_file = input_file.unwrap();
             let reader_size = cmp::min(
                 self.buffer_size,
-                input_file.metadata().unwrap().len() as usize
+                metadata.len() as usize
             );
             let mut reader = BufReader::with_capacity(
                 reader_size,
@@ -158,12 +182,11 @@ impl Archiver {
             // logging
             self.files_processed += 1;
             self.bytes_processed += bytes_copied as usize;
-
-            self.format_progress(format!("{}", file.display()));
-
             self.speed = (self.bytes_processed as f64 /
                 self.start_time.unwrap().elapsed().as_secs_f64()
             ) as usize;
+
+            self.format_progress(format!("{}", file.display()));
         }
 
         // not hacky in the slightest
@@ -184,21 +207,42 @@ impl Archiver {
         Ok(self.archive_size)
     }
 
-    /// Extract the contents of an archive into the output path
-    pub fn extract(&mut self) {
+    /// reads an archive header and returns its data
+    fn read_archive_header(&mut self) -> Result<ArchiveHeader, ArchivalError> {
         todo!()
+    }
+
+    /// reads a file header and returns its data
+    fn read_file_header(&mut self) -> Result<FileHeader, ArchivalError> {
+        todo!()
+    }
+
+    /// Extract the contents of an archive into the output path
+    pub fn extract(&mut self) -> Result<u64, ArchivalError> {
+        let archive = self.input.clone();
+        let ArchiveHeader(files, ver, encrypted) = self.read_archive_header()?;
+
+        for index in 0..files {
+            // read header
+            let FileHeader(name, method, compressed, decompressed) = self.read_file_header()?;
+            // read 'n' bytes specified by the header
+
+            // reconstruct the files into a dir with the same name as the archive
+        }
+
+        Ok(self.archive_size)
     }
 
     /// general function to run all operations specified by the command
     // todo : maybe a better name ig
-    pub fn operate(&mut self) -> Result<usize, ArchivalError> {
+    pub fn operate(&mut self) -> Result<u64, ArchivalError> {
         self.start_time = Some(Instant::now());
         match self.mode {
             Mode::Add => {
                 self.add()
             },
             Mode::Extract => {
-                todo!("extract the archive")
+                self.extract()
             }
         }
     }

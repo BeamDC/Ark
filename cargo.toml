@@ -3,6 +3,10 @@ name = "Ark"
 version = "0.1.0"
 edition = "2021"
 
+[[bin]]
+name = "Ark"
+path = "src/lib.rs"
+
 [dependencies]
 walkdir = "2"
 

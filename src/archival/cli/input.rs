@@ -158,7 +158,7 @@ impl Command {
             _ => None
         };
 
-        let mut reader = Command {
+        let reader = Command {
             mode,
             input,
             output,

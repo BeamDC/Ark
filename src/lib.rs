@@ -11,6 +11,12 @@ pub mod archival {
     }
 }
 
+pub mod organization {
+    pub mod data;
+    pub mod item;
+    pub mod log;
+}
+
 pub fn run() {
     use std::io;
     use std::io::BufRead;

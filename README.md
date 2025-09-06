@@ -1,2 +1,2 @@
 # Ark
-a file archiver
+an all-in-one file organization & archival tool

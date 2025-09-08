@@ -1,0 +1,13 @@
+files:2
+ver:0
+encrypted:false
+name:file1.mov
+method:0
+compressed:50
+decompressed:60
+12345678901234567890123456789012345678901234567890
+name:file2.mov
+method:0
+compressed:32
+decompressed:32
+00000000000000000000000000100000

@@ -30,7 +30,6 @@ impl Mode {
     }
 }
 
-// todo : better name this one sucks :(
 pub struct Command {
     // whether to add the input path to an output archive,
     // or to extract the input archive into the output path

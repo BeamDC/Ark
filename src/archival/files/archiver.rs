@@ -1,12 +1,26 @@
-use std::fs::{File, OpenOptions};
-use std::io::{copy, BufReader, BufWriter, Write};
-use std::path::PathBuf;
-use std::time::Instant;
-use std::cmp;
 use crate::archival::cli::input::{Command, Mode};
 use crate::archival::cli::output::FmtProgress;
 use crate::archival::files::header::{ArchiveHeader, FileHeader, Header};
 use crate::archival::files::indexer::{ArchiveIndexer, FileRange};
+use std::fs::{File, OpenOptions};
+use std::io::{copy, BufRead, BufReader, BufWriter, Read, Write};
+use std::path::PathBuf;
+use std::time::Instant;
+use std::{cmp, fs};
+use crate::constants::{GIGABYTE, KILOBYTE, MEGABYTE, TERABYTE};
+
+macro_rules! format_bytes {
+    ($s: expr) => {
+        // not hacky in the slightest
+        match $s as u64  {
+            0..=KILOBYTE => format!("{} bytes", $s),
+            KILOBYTE..MEGABYTE => format!("{:.1} KB", $s as f64 / KILOBYTE as f64),
+            MEGABYTE..GIGABYTE => format!("{:.1} MB", $s as f64 / MEGABYTE as f64),
+            GIGABYTE..TERABYTE => format!("{:.1} GB", $s as f64 / GIGABYTE as f64),
+            _ => format!("{:.1} TB", $s as f64 / TERABYTE as f64),
+        };
+    };
+}
 
 pub struct Archiver {
     pub mode: Mode,
@@ -25,6 +39,8 @@ pub struct Archiver {
 
     pub ranges: Vec<FileRange>,
     pub buffer_size: usize,
+
+    pub archive_reader: Option<BufReader<File>>,
 }
 
 pub struct ArchivalError(pub String);
@@ -63,6 +79,14 @@ impl Archiver {
             _ => 0
         };
 
+        // if archive is being extracted, create a buffer for reading it
+        let archive_reader = match mode {
+            Mode::Extract => {
+                Some(BufReader::new(File::open(&input).unwrap()))
+            },
+            _ => None
+        };
+
         Archiver {
             mode,
             input,
@@ -77,7 +101,77 @@ impl Archiver {
             speed: 0,
             ranges,
             buffer_size: 0,
+            archive_reader,
         }
+    }
+
+    /// reads an archive header and returns its data
+    pub fn read_archive_header(&mut self) -> Result<ArchiveHeader, ArchivalError> {
+        // FIXME : this code is ugly as fuck
+        //   & must be cleaned up for the love of all that is holy
+        let mut lines = Vec::<String>::with_capacity(Header::ARCHIVE_HEADER_SIZE);
+
+        for _ in 0..Header::ARCHIVE_HEADER_SIZE {
+            let mut line = String::new();
+            let bytes_read = self.archive_reader
+                .as_mut()
+                .unwrap()
+                .read_line(&mut line);
+            if bytes_read.is_err() {
+                return Err(ArchivalError(
+                    String::from(format!(
+                        "failed to read archive header: {}",
+                        bytes_read.err().unwrap()
+                    ))
+                ))
+            }
+            self.bytes_processed += bytes_read.unwrap();
+            lines.push(line.trim().to_string());
+        }
+
+        let data = lines.iter().map(|l| {
+            l.split(':').collect::<Vec<&str>>()
+        }).collect::<Vec<Vec<&str>>>();
+        let total_files = data[0][1].parse::<usize>().unwrap();
+        let version = data[1][1].parse::<usize>().unwrap();
+        let encrypted = data[2][1].parse::<bool>().unwrap();
+
+        Ok(ArchiveHeader(total_files, version, encrypted))
+    }
+
+    /// reads a file header and returns its data
+    pub fn read_file_header(&mut self) -> Result<FileHeader, ArchivalError> {
+        // read header lines
+        let mut lines = Vec::with_capacity(Header::FILE_HEADER_SIZE);
+        for _ in 0..Header::FILE_HEADER_SIZE {
+            let mut line = String::new();
+            let bytes_read = self.archive_reader
+                .as_mut()
+                .unwrap()
+                .read_line(&mut line);
+            if bytes_read.is_err() {
+                return Err(ArchivalError(
+                    String::from(format!(
+                        "failed to read archive header: {}",
+                        bytes_read.err().unwrap()
+                    ))
+                ))
+            }
+            self.bytes_processed += bytes_read.unwrap();
+            lines.push(line.trim().to_string());
+        }
+
+        // parse lines
+        let data = lines.iter().map(|l| {
+            l.split(':').collect::<Vec<&str>>()
+        }).collect::<Vec<Vec<&str>>>();
+        let name = data[0][1].parse::<String>().unwrap();
+        let method = data[1][1].parse::<u8>().unwrap();
+        let compressed = data[2][1].parse::<u64>().unwrap();
+        let decompressed = data[3][1].parse::<u64>().unwrap();
+
+        // return header data
+        Ok(FileHeader(name, method, compressed, decompressed))
     }
 
     /// Compile the files from the input path into the output archive.
@@ -98,7 +192,22 @@ impl Archiver {
 
         let mut buffer = BufWriter::with_capacity(self.buffer_size, output_file);
 
-        // todo : write archive header
+        // create and write the archive header
+        let header = Header::Archive {
+            total_files: self.file_count,
+            // todo : update this value if the archive is being updated,
+            //   otherwise it is zero when the archive is created
+            version: 0,
+            encrypted: false,
+        };
+        let write_res = buffer.write(header.to_bytes().as_slice());
+        if write_res.is_err() {
+            return Err(ArchivalError(
+                format!(
+                    "Failed to write archive header: {}",
+                    write_res.err().unwrap())
+            ))
+        }
 
         // write data from all files into one
         for (i, file) in self.files.iter().enumerate() {
@@ -114,17 +223,28 @@ impl Archiver {
             let input_file = input_file.unwrap();
             let metadata = input_file.metadata().unwrap();
 
-            //todo : compress the file
+            //todo : compress the file | apply any other operations
 
+            let relative_path = file.strip_prefix(&self.input)
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .to_string();
             let header = Header::File {
-                name: file.file_name().unwrap().to_str().unwrap().to_string(),
+                name: relative_path,
                 method: 0,
                 compressed_size: metadata.len(),
                 decompressed_size: metadata.len(),
             };
 
-            buffer.write(header.to_bytes().as_slice())
-                .expect("Failed to write file header");
+            let write_res = buffer.write(header.to_bytes().as_slice());
+            if write_res.is_err() {
+                return Err(ArchivalError(
+                    format!(
+                        "Could not write to output file: {}",
+                        write_res.err().unwrap())
+                ))
+            }
 
             // get current file range
             let current_range = self.ranges.get(
@@ -189,14 +309,7 @@ impl Archiver {
             self.format_progress(format!("{}", file.display()));
         }
 
-        // not hacky in the slightest
-        let speed = match self.speed  {
-            0..=1023 => format!("{} bytes", self.speed),
-            1024..=1048575 => format!("{:.1} KB", self.speed as f64 / 1024.0),
-            1048576..=1073741823 => format!("{:.1} MB", self.speed as f64 / (1024.0 * 1024.0)),
-            1073741824..=1099511627775 => format!("{:.1} GB", self.speed as f64 / (1024.0 * 1024.0 * 1024.0)),
-            _ => format!("{:.1} TB", self.speed as f64 / (1024.0 * 1024.0 * 1024.0 * 1024.0)),
-        };
+        let speed = format_bytes!(self.speed);
 
         println!(
             "Archival Completed in {:.2}s with a speed of {} per second",
@@ -207,28 +320,57 @@ impl Archiver {
         Ok(self.archive_size)
     }
 
-    /// reads an archive header and returns its data
-    fn read_archive_header(&mut self) -> Result<ArchiveHeader, ArchivalError> {
-        todo!()
-    }
-
-    /// reads a file header and returns its data
-    fn read_file_header(&mut self) -> Result<FileHeader, ArchivalError> {
-        todo!()
-    }
-
     /// Extract the contents of an archive into the output path
     pub fn extract(&mut self) -> Result<u64, ArchivalError> {
-        let archive = self.input.clone();
         let ArchiveHeader(files, ver, encrypted) = self.read_archive_header()?;
 
-        for index in 0..files {
+        for i in 0..files {
             // read header
             let FileHeader(name, method, compressed, decompressed) = self.read_file_header()?;
+
             // read 'n' bytes specified by the header
+            // we reserve an extra byte to account for the
+            // leading newline into the next file header
+            let mut buffer = if i == files - 1 {
+                vec![0; decompressed as usize]
+            } else {
+                vec![0; decompressed as usize + 1]
+            };
+            let read_res = self.archive_reader.as_mut().unwrap().read_exact(&mut buffer);
+            if let Err(e) = read_res {
+                return Err(ArchivalError(
+                    format!("failed to read file data: {}", e)
+                ))
+            }
+            // todo : decompress / decrypt files
+
+            let buffer = if i == files - 1 {
+                buffer.as_ref()
+            } else {
+                &buffer[0..compressed as usize]
+            };
 
             // reconstruct the files into a dir with the same name as the archive
+            let path = self.output.clone().join(PathBuf::from(&name));
+            fs::create_dir_all(&path.parent().unwrap()).unwrap();
+            fs::write(&path, buffer).unwrap();
+            self.format_progress(format!("{}", path.display()));
+
+            // logging
+            self.bytes_processed += buffer.len();
+            self.files_processed += 1;
+            self.speed = (self.bytes_processed as f64 /
+                self.start_time.unwrap().elapsed().as_secs_f64()
+            ) as usize;
         }
+
+        let speed = format_bytes!(self.speed);
+
+        println!(
+            "Extraction Completed in {:.2}s with a speed of {} per second",
+            self.start_time.unwrap().elapsed().as_secs_f64(),
+            speed,
+        );
 
         Ok(self.archive_size)
     }

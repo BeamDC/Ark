@@ -34,6 +34,10 @@ pub enum Header {
 }
 
 impl Header {
+    pub const ARCHIVE_HEADER_SIZE: usize = 3;
+    pub const FILE_HEADER_SIZE: usize = 4;
+
+    // pub const HEADER_LEN: u32 =
     pub fn to_bytes(&self) -> Vec<u8> {
         match self {
             Header::Archive { total_files, version, encrypted } => {
@@ -45,18 +49,10 @@ impl Header {
             Header::File
             { name, method, compressed_size, decompressed_size } => {
                 format!(
-                    "name:{}\nmethod:{}\ncompressed:{}\ndecompressed:{}\n",
+                    "\nname:{}\nmethod:{}\ncompressed:{}\ndecompressed:{}\n",
                     name, method, compressed_size, decompressed_size
                 )
             }
         }.into_bytes()
-    }
-
-    #[inline]
-    pub fn variant_count(&self) -> u8 {
-        match self {
-            Header::Archive { .. } => 3,
-            Header::File { .. } => 4,
-        }
     }
 }

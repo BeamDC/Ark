@@ -1,3 +1,5 @@
+mod constants;
+
 pub mod archival {
     pub mod cli {
         pub mod input;
@@ -18,7 +20,11 @@ pub mod organization {
 }
 
 mod tests {
+    #[cfg(test)]
     mod organizer_tests;
+
+    #[cfg(test)]
+    mod archiver_tests;
 }
 
 pub fn run() {

@@ -51,9 +51,14 @@ impl LogData {
         todo!("write body");
     }
 
-    /// check if a file already exists and is logged in `ark.data`
-    fn check_entry(&self, entry: String) {
-        todo!()
+    /// check if a file already exists and is contained in the current log
+    fn check_entry(&self, entry: PathBuf) -> bool {
+        for item in &self.items {
+            if item.path == entry {
+                return true
+            }
+        }
+        false
     }
 
     /// read and parse `ark.data` into `LogData`

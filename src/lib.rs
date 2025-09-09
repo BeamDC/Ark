@@ -11,6 +11,13 @@ pub mod archival {
         pub mod header;
         pub mod indexer;
     }
+
+    pub mod compression {
+        pub mod profiler;
+        pub mod file_compressor;
+        pub mod rle;
+        pub mod arithmetic;
+    }
 }
 
 pub mod organization {

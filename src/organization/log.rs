@@ -98,7 +98,7 @@ impl LogData {
         }
 
         // treat data like a stack since its easy to use :P
-        let mut data = fs::read_to_string(&data_path).unwrap();
+        let data = fs::read_to_string(&data_path).unwrap();
         let mut data = data
             .split('\n')
             .rev()

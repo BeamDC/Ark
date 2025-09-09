@@ -15,7 +15,8 @@ pub enum Token {
 
 pub enum Mode {
     Add,
-    Extract
+    Extract,
+    Profile,
 }
 
 impl Mode {
@@ -23,6 +24,7 @@ impl Mode {
         match s.to_lowercase().as_ref() {
             "add" | "a" => Mode::Add,
             "extract" | "x" => Mode::Extract,
+            "profile" | "p" => Mode::Profile,
             _ => {
                 todo!("incorrect mode specification error")
             }
@@ -110,7 +112,10 @@ impl Command {
                         "ark" => tokens.push(Token::Ark),
                         "a" | "add" => tokens.push(Token::Mode(String::from("add"))),
                         "x" | "extract" => tokens.push(
-                            Token::Mode(String::from("x"))
+                            Token::Mode(String::from("extract"))
+                        ),
+                        "p" | "profile" => tokens.push(
+                            Token::Mode(String::from("profile"))
                         ),
                         _ => tokens.push(Token::GenericString(res))
                     }

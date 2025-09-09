@@ -1,24 +1,26 @@
 use crate::archival::cli::input::{Command, Mode};
 use crate::archival::cli::output::FmtProgress;
+use crate::archival::compression::file_compressor::Compressor;
+use crate::archival::compression::profiler::Profiler;
 use crate::archival::files::header::{ArchiveHeader, FileHeader, Header};
 use crate::archival::files::indexer::{ArchiveIndexer, FileRange};
+use crate::constants::{GIGABYTE, KILOBYTE, MEGABYTE, TERABYTE};
 use std::fs::{File, OpenOptions};
-use std::io::{copy, BufRead, BufReader, BufWriter, Read, Write};
+use std::io::{BufRead, BufReader, BufWriter, Read, Write};
 use std::path::PathBuf;
 use std::time::Instant;
-use std::{cmp, fs};
-use crate::constants::{GIGABYTE, KILOBYTE, MEGABYTE, TERABYTE};
+use std::fs;
 
 macro_rules! format_bytes {
     ($s: expr) => {
         // not hacky in the slightest
         match $s as u64  {
-            0..=KILOBYTE => format!("{} bytes", $s),
+            0..KILOBYTE => format!("{} bytes", $s),
             KILOBYTE..MEGABYTE => format!("{:.1} KB", $s as f64 / KILOBYTE as f64),
             MEGABYTE..GIGABYTE => format!("{:.1} MB", $s as f64 / MEGABYTE as f64),
             GIGABYTE..TERABYTE => format!("{:.1} GB", $s as f64 / GIGABYTE as f64),
             _ => format!("{:.1} TB", $s as f64 / TERABYTE as f64),
-        };
+        }
     };
 }
 
@@ -60,7 +62,7 @@ impl Archiver {
 
         let output = match command.output {
             Some(output) => output,
-            None => {todo!("return error that no output was given")}
+            None => { todo!("return error that no output was given") }
         };
 
 
@@ -152,8 +154,11 @@ impl Archiver {
             if bytes_read.is_err() {
                 return Err(ArchivalError(
                     String::from(format!(
-                        "failed to read archive header: {}",
-                        bytes_read.err().unwrap()
+                        "failed to read file header: {}\n\
+                        current line contents: \"{}\"\n\
+                        current line bytes: \"{:?}\"\n\
+                        lines read: {:?}",
+                        bytes_read.err().unwrap(), line, line.as_bytes(), lines
                     ))
                 ))
             }
@@ -210,30 +215,40 @@ impl Archiver {
         }
 
         // write data from all files into one
-        for (i, file) in self.files.iter().enumerate() {
-            let input_file = File::open(file);
+        for (i, path) in self.files.iter().enumerate() {
+            let input_file = File::open(path.clone());
             if input_file.is_err() {
                 return Err(ArchivalError(
                     format!(
                         "Could not open input file: \"{}\"\nreason: {}",
-                        file.display(),
+                        path.display(),
                         input_file.err().unwrap())
                 ))
             }
             let input_file = input_file.unwrap();
             let metadata = input_file.metadata().unwrap();
 
-            //todo : compress the file | apply any other operations
+            // profile the file to determine the best method to compress it
+            let mut file_profile = Profiler::new(path.clone());
+            file_profile.profile();
+            let method = file_profile.to_method();
 
-            let relative_path = file.strip_prefix(&self.input)
+            // compress the file data
+            let mut file_compressor = Compressor::new(
+                fs::read(path).unwrap(), method
+            );
+            let new_data = file_compressor.compress();
+
+            // create and write file header
+            let relative_path = path.strip_prefix(&self.input)
                 .unwrap()
                 .to_str()
                 .unwrap()
                 .to_string();
             let header = Header::File {
                 name: relative_path,
-                method: 0,
-                compressed_size: metadata.len(),
+                method,
+                compressed_size: new_data.len() as u64,
                 decompressed_size: metadata.len(),
             };
 
@@ -280,33 +295,16 @@ impl Archiver {
                 buffer = BufWriter::with_capacity(self.buffer_size, writer);
             }
 
-            // read file
-            let reader_size = cmp::min(
-                self.buffer_size,
-                metadata.len() as usize
-            );
-            let mut reader = BufReader::with_capacity(
-                reader_size,
-                input_file
-            );
-
-            // stream copy instead of loading everything into memory
-            let bytes_copied = copy(&mut reader, &mut buffer);
-            if bytes_copied.is_err() {
-                return Err(ArchivalError(
-                    String::from("failed to copy to buffer")
-                ))
-            }
-            let bytes_copied = bytes_copied.unwrap();
+            buffer.write_all(new_data.as_slice()).unwrap();
 
             // logging
             self.files_processed += 1;
-            self.bytes_processed += bytes_copied as usize;
+            self.bytes_processed += new_data.len();
             self.speed = (self.bytes_processed as f64 /
                 self.start_time.unwrap().elapsed().as_secs_f64()
             ) as usize;
 
-            self.format_progress(format!("{}", file.display()));
+            self.format_progress(format!("{}", path.display()));
         }
 
         let speed = format_bytes!(self.speed);
@@ -322,7 +320,7 @@ impl Archiver {
 
     /// Extract the contents of an archive into the output path
     pub fn extract(&mut self) -> Result<u64, ArchivalError> {
-        let ArchiveHeader(files, ver, encrypted) = self.read_archive_header()?;
+        let ArchiveHeader(files, _ver, encrypted) = self.read_archive_header()?;
 
         for i in 0..files {
             // read header
@@ -332,17 +330,17 @@ impl Archiver {
             // we reserve an extra byte to account for the
             // leading newline into the next file header
             let mut buffer = if i == files - 1 {
-                vec![0; decompressed as usize]
+                vec![0; compressed as usize]
             } else {
-                vec![0; decompressed as usize + 1]
+                vec![0; compressed as usize + 1]
             };
+
             let read_res = self.archive_reader.as_mut().unwrap().read_exact(&mut buffer);
             if let Err(e) = read_res {
                 return Err(ArchivalError(
                     format!("failed to read file data: {}", e)
                 ))
             }
-            // todo : decompress / decrypt files
 
             let buffer = if i == files - 1 {
                 buffer.as_ref()
@@ -350,10 +348,13 @@ impl Archiver {
                 &buffer[0..compressed as usize]
             };
 
+            let mut decompressor = Compressor::new(buffer.to_vec(), method);
+            let decompressed_data = decompressor.decompress();
+
             // reconstruct the files into a dir with the same name as the archive
             let path = self.output.clone().join(PathBuf::from(&name));
             fs::create_dir_all(&path.parent().unwrap()).unwrap();
-            fs::write(&path, buffer).unwrap();
+            fs::write(&path, decompressed_data).unwrap();
             self.format_progress(format!("{}", path.display()));
 
             // logging
@@ -375,6 +376,19 @@ impl Archiver {
         Ok(self.archive_size)
     }
 
+    /// profile the input path and log the details
+    pub fn profile(&mut self) -> Result<u64, ArchivalError> {
+        if self.input.is_dir() {
+            return Err(ArchivalError(
+                "Profiling target must be a file!".to_owned()
+            ))
+        }
+        let mut profiler = Profiler::new(self.input.clone());
+        profiler.profile();
+        println!("Profile: \n{:?}", profiler);
+        Ok(0)
+    }
+
     /// general function to run all operations specified by the command
     // todo : maybe a better name ig
     pub fn operate(&mut self) -> Result<u64, ArchivalError> {
@@ -385,6 +399,9 @@ impl Archiver {
             },
             Mode::Extract => {
                 self.extract()
+            }
+            Mode::Profile => {
+                self.profile()
             }
         }
     }

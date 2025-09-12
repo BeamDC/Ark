@@ -1,7 +1,10 @@
 use std::{fmt, fs};
+use std::cmp::min;
+use std::ffi::OsStr;
 use std::fmt::Formatter;
 use std::path::PathBuf;
 use std::time::Instant;
+use crate::constants::{GIGABYTE, MEGABYTE};
 
 /// a profiler for determining useful methods for compressing a file
 pub struct Profiler {
@@ -13,9 +16,6 @@ pub struct Profiler {
     pub rle: bool,          // will be true if rle is recommended
     pub two_byte_rle: bool, // will be true if two byte rle is recommended
     pub avg_run_len: f32,   // the average run length of the bytes in this file
-
-    // arithmetic data
-    pub arithmetic: bool,
 }
 
 impl Default for Profiler {
@@ -27,7 +27,6 @@ impl Default for Profiler {
             rle: false,
             two_byte_rle: false,
             avg_run_len: 0.0,
-            arithmetic: false,
         }
     }
 }
@@ -38,7 +37,6 @@ impl fmt::Debug for Profiler {
         writeln!(f, "{}", format!("  - RLE recommended -> {}", self.rle))?;
         writeln!(f, "{}", format!("  - two byte RLE recommended -> {}", self.two_byte_rle))?;
         writeln!(f, "{}", format!("  - AVG run length  -> {}", self.avg_run_len))?;
-        writeln!(f, "{}", format!("  - Arithmetic coding recommended  -> {}", self.arithmetic))?;
         writeln!(f, "{}", format!("Profiling completed in {}ms", self.start.unwrap().elapsed().as_millis()))
     }
 }
@@ -81,16 +79,44 @@ impl Profiler {
     /// that far exceed 255, at this point it is worth investing an extra byte
     /// of run length in order to compress these long runs further
     fn validate_rle(&mut self) {
-        let mut current = None;
-        let mut runs = 0u64;
-        for byte in &self.data {
-            if current.is_none() || byte != current.unwrap() {
-                runs += 1;
-                current = Some(byte);
-            }
+        let ext = self.file.extension()
+            .unwrap_or_else(|| OsStr::new(""))
+            .to_ascii_lowercase();
+        match ext.to_str().unwrap() {
+            "bmp" | "tiff" | "pdf" => {}
+            _ => return,
         }
 
-        self.avg_run_len = self.data.len() as f32 / runs.max(1) as f32;
+        self.avg_run_len = if self.data.len() > MEGABYTE as usize {
+            let sample_size: usize = min(2048, self.data.len() / 4);
+            let mut start = self.data[..sample_size].to_vec();
+            let mid = self.data.len() / 2;
+            let mut mid = self.data[mid..sample_size + mid].to_vec();
+            let mut end = self.data[self.data.len() - sample_size..].to_vec();
+
+            let size = start.len() + mid.len() + end.len();
+
+            start.dedup();
+            mid.dedup();
+            end.dedup();
+
+            let runs = start.len() + mid.len() + end.len();
+
+            size as f32 / runs.max(1) as f32
+        } else {
+            let mut current = None;
+            let mut runs = 0u64;
+            for byte in &self.data {
+                if current.is_none() || byte != current.unwrap() {
+                    runs += 1;
+                    current = Some(byte);
+                }
+            }
+
+            self.data.len() as f32 / runs.max(1) as f32
+        };
+
+
         self.rle = match &self.avg_run_len {
             // not recommended
             0.0..=2.0 => false,
@@ -104,10 +130,19 @@ impl Profiler {
         }
     }
 
-    pub fn profile(&mut self) {
+    #[must_use]
+    pub fn profile(&mut self) -> u8 {
         self.start = Some(Instant::now());
+
+        // some files may be too big to be worth compressing
+        if self.file.metadata().unwrap().len() >= GIGABYTE {
+            return 0
+        }
+
         self.validate_rle();
+        self.to_method()
     }
+
     /// returns a u8 where bits are mapped to different algorithms used to compress the data
     /// the mapping is such that the largest bit (assuming little endian)
     /// represents the first operation performed
@@ -126,7 +161,7 @@ impl Profiler {
     ///
     /// 0 ->
     ///
-    /// 1 -> is arithmetic coding used?
+    /// 1 ->
     ///
     /// in binary the above method is represented as: `11000001`
     pub fn to_method(&self) -> u8 {
@@ -134,8 +169,7 @@ impl Profiler {
             | ((self.rle as u8) << 7)
             | ((self.two_byte_rle as u8) << 6)
             // ... put other method stuff here ...
-            | self.arithmetic as u8;
-
+            ;
         method
     }
 }

@@ -46,9 +46,8 @@ impl LogData {
     }
 
     /// write all file data to `ark.data`
-    pub fn write_log(&self, data: LogData) {
-        todo!("write header");
-        todo!("write body");
+    pub fn write_log(&self, _data: LogData) {
+        todo!("write header & body");
     }
 
     /// check if a file already exists and is contained in the current log

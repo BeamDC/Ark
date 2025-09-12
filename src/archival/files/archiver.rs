@@ -6,23 +6,11 @@ use crate::archival::files::header::{ArchiveHeader, FileHeader, Header};
 use crate::archival::files::indexer::{ArchiveIndexer, FileRange};
 use crate::constants::{GIGABYTE, KILOBYTE, MEGABYTE, TERABYTE};
 use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader, BufWriter, Read, Write};
+use std::io::{copy, BufRead, BufReader, BufWriter, Read, Write};
 use std::path::PathBuf;
 use std::time::Instant;
-use std::fs;
-
-macro_rules! format_bytes {
-    ($s: expr) => {
-        // not hacky in the slightest
-        match $s as u64  {
-            0..KILOBYTE => format!("{} bytes", $s),
-            KILOBYTE..MEGABYTE => format!("{:.1} KB", $s as f64 / KILOBYTE as f64),
-            MEGABYTE..GIGABYTE => format!("{:.1} MB", $s as f64 / MEGABYTE as f64),
-            GIGABYTE..TERABYTE => format!("{:.1} GB", $s as f64 / GIGABYTE as f64),
-            _ => format!("{:.1} TB", $s as f64 / TERABYTE as f64),
-        }
-    };
-}
+use std::{cmp, fs};
+use crate::format_bytes;
 
 pub struct Archiver {
     pub mode: Mode,
@@ -43,6 +31,9 @@ pub struct Archiver {
     pub buffer_size: usize,
 
     pub archive_reader: Option<BufReader<File>>,
+    pub archive_writer: Option<BufWriter<File>>,
+
+    pub files_compressed: usize,
 }
 
 pub struct ArchivalError(pub String);
@@ -89,6 +80,11 @@ impl Archiver {
             _ => None
         };
 
+        let archive_writer = match mode {
+            // Mode::Add => Some(BufWriter::new(File::create(&output).unwrap())),
+            _ => None
+        };
+
         Archiver {
             mode,
             input,
@@ -104,7 +100,76 @@ impl Archiver {
             ranges,
             buffer_size: 0,
             archive_reader,
+            archive_writer,
+            files_compressed: 0,
         }
+    }
+
+    fn open_output_file(&self) -> Result<File, ArchivalError> {
+        let output_file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.output);
+        if output_file.is_err() {
+            return Err(
+                ArchivalError(String::from("Could not open output file"))
+            )
+        }
+        Ok(output_file.unwrap())
+    }
+
+    fn get_file_range(&self, pos: usize) -> Result<FileRange, ArchivalError> {
+        let current_range = self.ranges.get(
+            self.ranges.iter().position(|fr| {
+                pos >= fr.range.0 && pos < fr.range.1
+            }).unwrap()
+        );
+        if current_range.is_none() {
+            return Err(ArchivalError(
+                format!("Could not find range for file indexed at {}", pos)
+            ))
+        }
+        Ok(current_range.unwrap().clone())
+    }
+
+    fn build_archive_header(&self) -> Result<Header, ArchivalError> {
+        Ok(Header::Archive {
+            total_files: self.file_count,
+            // todo : update this value if the archive is being updated,
+            //   otherwise it is zero when the archive is created
+            version: 0,
+            encrypted: false,
+        })
+    }
+
+    fn build_file_header(
+        &self, path: &PathBuf, compressed: usize, method: u8,
+    ) -> Result<Header, ArchivalError>
+    {
+        let input_file = File::open(path.clone());
+        if input_file.is_err() {
+            return Err(ArchivalError(
+                format!(
+                    "Could not open input file: \"{}\"\nreason: {}",
+                    path.display(),
+                    input_file.err().unwrap())
+            ))
+        }
+
+        let relative_path = path.strip_prefix(&self.input)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+
+        let metadata = input_file.unwrap().metadata().unwrap();
+
+       Ok(Header::File {
+            name: relative_path,
+            method,
+            compressed_size: compressed as u64,
+            decompressed_size: metadata.len(),
+        })
     }
 
     /// reads an archive header and returns its data
@@ -179,152 +244,165 @@ impl Archiver {
         Ok(FileHeader(name, method, compressed, decompressed))
     }
 
-    /// Compile the files from the input path into the output archive.
-    /// if the archive does exist it will be updated with the given files,
-    /// otherwise it will simply be created from
-    /// all files contained in the input path
-    pub fn add(&mut self) -> Result<u64, ArchivalError>{
-        let output_file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.output);
-        if output_file.is_err() {
-            return Err(
-                ArchivalError(String::from("Could not open output file"))
-            )
+    fn archive_uncompressed_file(&mut self, path: &PathBuf) -> Result<u64, ArchivalError> {
+        let input_file = File::open(path);
+        if input_file.is_err() {
+            return Err(ArchivalError(
+                format!(
+                    "Could not open input file: \"{}\"\nreason: {}",
+                    path.display(),
+                    input_file.err().unwrap())
+            ))
         }
-        let output_file = output_file.unwrap();
+        let input_file = input_file.unwrap();
+        let metadata = input_file.metadata().unwrap();
 
-        let mut buffer = BufWriter::with_capacity(self.buffer_size, output_file);
-
-        // create and write the archive header
-        let header = Header::Archive {
-            total_files: self.file_count,
-            // todo : update this value if the archive is being updated,
-            //   otherwise it is zero when the archive is created
-            version: 0,
-            encrypted: false,
+        let relative_path = path.strip_prefix(&self.input)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        let header = Header::File {
+            name: relative_path,
+            method: 0,
+            compressed_size: metadata.len(),
+            decompressed_size: metadata.len(),
         };
-        let write_res = buffer.write(header.to_bytes().as_slice());
+
+        let write_res = self.archive_writer.as_mut().unwrap().write(header.to_bytes().as_slice());
         if write_res.is_err() {
             return Err(ArchivalError(
                 format!(
-                    "Failed to write archive header: {}",
+                    "Could not write to output file: {}",
                     write_res.err().unwrap())
             ))
         }
 
-        // write data from all files into one
-        for (i, path) in self.files.iter().enumerate() {
-            let input_file = File::open(path.clone());
-            if input_file.is_err() {
-                return Err(ArchivalError(
-                    format!(
-                        "Could not open input file: \"{}\"\nreason: {}",
-                        path.display(),
-                        input_file.err().unwrap())
-                ))
-            }
-            let input_file = input_file.unwrap();
-            let metadata = input_file.metadata().unwrap();
+        // read file
+        let reader_size = cmp::min(
+            self.buffer_size,
+            metadata.len() as usize
+        );
+        let mut reader = BufReader::with_capacity(
+            reader_size,
+            input_file
+        );
 
+        // stream copy instead of loading everything into memory
+        let bytes_copied = copy(&mut reader, &mut self.archive_writer.as_mut().unwrap());
+        if bytes_copied.is_err() {
+            return Err(ArchivalError(
+                String::from("failed to copy to buffer")
+            ))
+        }
+        let bytes_copied = bytes_copied.unwrap();
+
+        // logging
+        self.files_processed += 1;
+        self.bytes_processed += bytes_copied as usize;
+        self.speed = (self.bytes_processed as f64 /
+            self.start_time.unwrap().elapsed().as_secs_f64()
+        ) as usize;
+
+        self.format_progress(format!("{}", path.display()));
+
+        Ok(0)
+    }
+
+    fn archive_compressed_file(
+        &mut self, method: u8, path: &PathBuf
+    ) -> Result<u64, ArchivalError>
+    {
+        let mut file_compressor = Compressor::new(
+            // FIXME : reading the whole fine in at once is a flawless idea
+            //   that wont overuse memory or cause any crashes :)
+            fs::read(path).unwrap(), method
+        );
+
+        let new_data = file_compressor.compress();
+
+        // create and write file header
+        let header = self.build_file_header(path, new_data.len(), method)?;
+        match self.archive_writer.as_mut().unwrap().write(header.to_bytes().as_slice()) {
+            Err(e) => {
+                return Err(
+                    ArchivalError(
+                        format!("Failed to write file header: {}", e)
+                    )
+                )
+            }
+            _ => {}
+        };
+
+        self.archive_writer.as_mut().unwrap().write_all(new_data.as_slice()).unwrap();
+
+        // logging
+        self.files_processed += 1;
+        self.bytes_processed += new_data.len();
+        self.speed = (self.bytes_processed as f64 /
+            self.start_time.unwrap().elapsed().as_secs_f64()
+        ) as usize;
+
+        self.format_progress(format!("{}", path.display()));
+        Ok(0)
+    }
+
+    /// Compile the files from the input path into the output archive.
+    /// if the archive does exist it will be updated with the given files,
+    /// otherwise it will simply be created from
+    /// all files contained in the input path
+    fn add(&mut self) -> Result<u64, ArchivalError>{
+        let output_file = self.open_output_file()?;
+        self.archive_writer = Some(BufWriter::with_capacity(MEGABYTE as usize * 8, output_file));
+
+        // create and write the archive header
+        let header = self.build_archive_header()?;
+        match self.archive_writer.as_mut().unwrap().write(header.to_bytes().as_slice()) {
+            Err(e) => {
+                return Err(
+                    ArchivalError(
+                        format!("Failed to write archive header: {}", e)
+                    )
+                )
+            }
+            _ => {}
+        };
+
+        // write data from all files into one
+        for (_i, path) in self.files.clone().iter().enumerate() {
             // profile the file to determine the best method to compress it
             let mut file_profile = Profiler::new(path.clone());
-            file_profile.profile();
-            let method = file_profile.to_method();
-
-            // compress the file data
-            let mut file_compressor = Compressor::new(
-                fs::read(path).unwrap(), method
-            );
-            let new_data = file_compressor.compress();
-
-            // create and write file header
-            let relative_path = path.strip_prefix(&self.input)
-                .unwrap()
-                .to_str()
-                .unwrap()
-                .to_string();
-            let header = Header::File {
-                name: relative_path,
-                method,
-                compressed_size: new_data.len() as u64,
-                decompressed_size: metadata.len(),
+            match file_profile.profile() {
+                0 => {
+                    self.archive_uncompressed_file(path)?;
+                }
+                m => {
+                    self.files_compressed += 1;
+                    self.archive_compressed_file(m, path)?;
+                }
             };
-
-            let write_res = buffer.write(header.to_bytes().as_slice());
-            if write_res.is_err() {
-                return Err(ArchivalError(
-                    format!(
-                        "Could not write to output file: {}",
-                        write_res.err().unwrap())
-                ))
-            }
-
-            // get current file range
-            let current_range = self.ranges.get(
-                self.ranges.iter().position(|fr| {
-                    i >= fr.range.0 && i < fr.range.1
-                }).unwrap()
-            );
-            if current_range.is_none() {
-                return Err(ArchivalError(
-                    format!("Could not find range for file indexed at {}", i)
-                ))
-            }
-            let current_range = current_range.unwrap();
-
-            // resize buffer
-            if current_range.buffer_size > self.buffer_size {
-                self.buffer_size = current_range.buffer_size;
-
-                let flush = buffer.flush();
-                if flush.is_err() {
-                    return Err(ArchivalError(
-                        String::from("failed to flush buffer during resize")
-                    ))
-                }
-                let writer = buffer.into_inner();
-                if writer.is_err() {
-                    return Err(ArchivalError(
-                        String::from("failed to get inner writer from buffer")
-                    ))
-                }
-                let writer = writer.unwrap();
-
-                buffer = BufWriter::with_capacity(self.buffer_size, writer);
-            }
-
-            buffer.write_all(new_data.as_slice()).unwrap();
-
-            // logging
-            self.files_processed += 1;
-            self.bytes_processed += new_data.len();
-            self.speed = (self.bytes_processed as f64 /
-                self.start_time.unwrap().elapsed().as_secs_f64()
-            ) as usize;
-
-            self.format_progress(format!("{}", path.display()));
         }
 
         let speed = format_bytes!(self.speed);
 
         println!(
-            "Archival Completed in {:.2}s with a speed of {} per second",
+            "Archival Completed in {:.2}s with a speed of {} per second\
+            \n{} files compressed, for about {:.2}% of files",
             self.start_time.unwrap().elapsed().as_secs_f64(),
-            speed,
+            speed, self.files_compressed,
+            self.files_compressed as f64 / self.files_processed as f64
         );
 
         Ok(self.archive_size)
     }
 
     /// Extract the contents of an archive into the output path
-    pub fn extract(&mut self) -> Result<u64, ArchivalError> {
-        let ArchiveHeader(files, _ver, encrypted) = self.read_archive_header()?;
+    fn extract(&mut self) -> Result<u64, ArchivalError> {
+        let ArchiveHeader(files, _ver, _encrypted) = self.read_archive_header()?;
 
         for i in 0..files {
             // read header
-            let FileHeader(name, method, compressed, decompressed) = self.read_file_header()?;
+            let FileHeader(name, method, compressed, _decompressed) = self.read_file_header()?;
 
             // read 'n' bytes specified by the header
             // we reserve an extra byte to account for the
@@ -384,7 +462,7 @@ impl Archiver {
             ))
         }
         let mut profiler = Profiler::new(self.input.clone());
-        profiler.profile();
+        let _ = profiler.profile();
         println!("Profile: \n{:?}", profiler);
         Ok(0)
     }

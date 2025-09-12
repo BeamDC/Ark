@@ -16,7 +16,6 @@ pub mod archival {
         pub mod profiler;
         pub mod file_compressor;
         pub mod rle;
-        pub mod arithmetic;
     }
 }
 
@@ -29,7 +28,6 @@ pub mod organization {
 mod tests {
     #[cfg(test)]
     mod organizer_tests;
-
     #[cfg(test)]
     mod archiver_tests;
 }

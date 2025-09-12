@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 use walkdir::WalkDir;
 
+#[derive(Clone)]
 pub struct FileRange {
     pub range: (usize, usize),
     pub buffer_size: usize,
@@ -51,7 +52,7 @@ impl ArchiveIndexer {
     pub fn index_files(&mut self) {
         self.read_start_time = Some(Instant::now());
 
-        let mut contents = WalkDir::new(&self.root)
+        let contents = WalkDir::new(&self.root)
             .into_iter()
             .filter_map(|entry| entry.ok())
             .filter(|entry| entry.file_type().is_file())
@@ -62,11 +63,11 @@ impl ArchiveIndexer {
             .collect::<Vec<PathBuf>>();
 
         // Sort by file size, smallest first
-        contents.sort_by_key(|path| {
-            std::fs::metadata(path)
-                .map(|m| m.len())
-                .unwrap_or(u64::MAX) // Put files we can't read at the end
-        });
+        // contents.sort_by_key(|path| {
+        //     std::fs::metadata(path)
+        //         .map(|m| m.len())
+        //         .unwrap_or(u64::MAX) // Put files we can't read at the end
+        // });
 
         // get files sizes
         let sizes = WalkDir::new(&self.root)
@@ -77,8 +78,8 @@ impl ArchiveIndexer {
 
         // find file ranges
         let (mut start, mut end) = (0, 0);
-        let mut current_buffer_size = None;
         let mut prev_buffer_size = None;
+        let mut current_buffer_size;
         for size in sizes {
             current_buffer_size = Some(Self::get_ideal_buffer_size(size));
 
